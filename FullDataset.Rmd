@@ -1,0 +1,810 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+df <- read.csv("/Users/zsayali1/Documents/2104_Creativity/EBRWMC_Updated.csv")
+df[df == 999] <- NA
+df$Dose <- factor(df$Dose)
+df$Dose <- relevel(df$Dose, ref = "Baseline")
+df$Session <- factor(df$Session)
+df$`Participant.ID` <- factor(df$`Participant.ID`)
+vars_to_scale <- setdiff(names(df), c("Participant.ID", "Dose", "Session"))
+df[vars_to_scale] <- scale(df[vars_to_scale]) # zscore continous variables
+summary(df)
+
+
+# we use EBR as an individual variability measure for creativity: https://www.sciencedirect.com/science/article/pii/S0010027710000715?via%3Dihub
+
+# Load libraries
+library(ggplot2)
+library(ggpubr)
+
+
+
+```
+
+```{r}
+
+dplyr::n_distinct(df$Participant.ID)
+table(is.na(df$Participant.ID))
+head(df$Participant.ID, 20)
+
+p1 <- ggplot(df, aes(x = factor(Dose), y = EBR)) +
+  geom_boxplot( outlier.shape = NA, alpha = 0.5) +
+  geom_jitter(
+    aes(color = factor(Participant.ID)),
+    width = 0.2,
+    size = 1.5,
+    alpha = 0.6,
+    show.legend = FALSE
+  ) +
+  labs(
+    x = "Dose",
+    y = "EBR",
+    fill = "Dose"
+  ) +
+  theme_classic(base_size = 30)
+
+model_lmm <- lmer(EBR ~ Dose + (1 | Participant.ID), data = df)
+summary(model_lmm)
+anova(model_lmm)
+
+
+```
+
+```{r}
+df_baseline <- df %>%
+  filter(Dose == "Baseline")
+
+vars_to_scale <- setdiff(names(df_baseline), c("Participant.ID", "Dose", "Session"))
+
+df_baseline[vars_to_scale] <- scale(df_baseline[vars_to_scale])
+
+plot(df_baseline$EBR, df_baseline$AUT_Originality)
+
+m_linear <- lm(AUT_Originality ~ EBR, data = df_baseline)
+
+summary(lm(AUT_Originality ~ EBR, data = df_baseline))
+
+m_quad <- lm(AUT_Originality ~ EBR + I(EBR^2) + WMC, data = df_baseline)
+
+summary(m_quad)
+
+anova(m_linear, m_quad)
+```
+```{r}
+library(dplyr)
+library(ggplot2)
+
+df_baseline <- df %>%
+  filter(Dose == "Baseline") %>%
+  select(Participant.ID, EBR, WMC, AUT_Originality) %>%
+  na.omit()
+
+ggplot(df_baseline, aes(x = EBR, y = AUT_Originality)) +
+  geom_point(aes(color = Participant.ID), size = 2.8, alpha = 0.9) +
+  stat_smooth(
+    method = "lm",
+    formula = y ~ x + I(x^2),
+    se = TRUE,
+    color = "black",
+    linewidth = 1
+  ) +
+  labs(
+    title = "Baseline AUT Originality vs EBR",
+    subtitle = "Quadratic fit",
+    x = "EBR",
+    y = "AUT Originality"
+  ) +
+  theme_classic() +
+  theme(legend.position = "none")
+```
+```{r}
+df_baseline <- df %>%
+  filter(Dose == "Baseline") %>%
+  select(Participant.ID, EBR, WMC, AUT_Originality) %>%
+  na.omit()
+
+m_quad <- lm(AUT_Originality ~ EBR + I(EBR^2) + WMC, data = df_baseline)
+
+df_baseline$cooks_d <- cooks.distance(m_quad)
+df_baseline$hat <- hatvalues(m_quad)
+df_baseline$std_resid <- rstandard(m_quad)
+
+df_baseline %>%
+  arrange(desc(cooks_d)) %>%
+  head()
+```
+```{r}
+cutoff <- 4 / nrow(df_baseline)
+
+df_baseline %>%
+  mutate(influential = cooks_d > cutoff) %>%
+  select(Participant.ID, EBR, AUT_Originality, cooks_d, hat, std_resid, influential) %>%
+  arrange(desc(cooks_d))
+
+library(ggplot2)
+
+p2 <- ggplot(df_baseline, aes(x = EBR, y = AUT_Originality)) +
+  geom_point(aes(color = cooks_d > cutoff), size = 3) +
+  geom_text(
+    aes(label = ifelse(cooks_d > cutoff, Participant.ID, "")),
+    nudge_y = 0.15,
+    show.legend = FALSE
+  ) +
+  stat_smooth(
+    method = "lm",
+    formula = y ~ x + I(x^2),
+    se = TRUE,
+    color = "black",
+    linewidth = 1
+  ) +
+  scale_color_manual(values = c("black", "red")) +
+  labs(
+    subtitle = "Potentially influential points labeled",
+    x = "EBR",
+    y = "AUT Originality",
+    color = "Influential"
+  ) +
+  theme_classic(base_size = 30)
+
+infl_id <- df_baseline %>%
+  slice_max(cooks_d, n = 1) %>%
+  pull(Participant.ID)
+
+df_baseline_no_outlier <- df_baseline %>%
+  filter(Participant.ID != infl_id)
+
+m_quad_no_outlier <- lm(AUT_Originality ~ EBR + I(EBR^2) + WMC, data = df_baseline_no_outlier)
+
+summary(m_quad)
+summary(m_quad_no_outlier)
+anova(m_quad_no_outlier)
+```
+
+
+
+```{r}
+
+run_baseline_analysis <- function(data, outcome, id_var = "Participant.ID") {
+  
+  dat <- data %>%
+    filter(Dose == "Baseline") %>%
+    select(all_of(c(id_var, "EBR", "WMC", outcome))) %>%
+    na.omit()
+  
+  colnames(dat)[colnames(dat) == outcome] <- "y"
+  
+  model <- lm(y ~ EBR + WMC, data = dat)
+  
+  p_ebr <- ggplot(dat, aes(x = EBR, y = y)) +
+    geom_point(aes(color = .data[[id_var]]), size = 2.5, alpha = 0.9) +
+    geom_smooth(method = "lm", se = TRUE, color = "black") +
+    labs(
+      x = "EBR",
+      y = outcome
+    ) +
+    theme_classic(base_size = 30) +
+    theme(legend.position = "none")
+  
+  p_wmc <- ggplot(dat, aes(x = WMC, y = y)) +
+    geom_point(aes(color = .data[[id_var]]), size = 2.5, alpha = 0.9) +
+    geom_smooth(method = "lm", se = TRUE, color = "black") +
+    labs(
+      x = "WMC",
+      y = outcome
+    ) +
+    theme_classic(base_size = 30) +
+    theme(legend.position = "none")
+  
+  list(
+    data = dat,
+    model = model,
+    summary = summary(model),
+    anova = anova(model),
+    plot_ebr = p_ebr,
+    plot_wmc = p_wmc
+  )
+}
+```
+
+```{r}
+baseline_outcomes <- c(
+  "RAT_Accuracy",
+  "RAT_Accurate_Insight",
+  "RAT_Inaccurate_Insight",
+  "RAT_N.A_Insight",
+  "AUT_Originality",
+  "AUT_Fluency",
+  "AUT_Flexibility"
+)
+
+baseline_results <- lapply(baseline_outcomes, function(v) run_baseline_analysis(df, v))
+names(baseline_results) <- baseline_outcomes
+```
+
+```{r}
+baseline_results[["AUT_Originality"]]$summary
+print(baseline_results[["AUT_Originality"]]$plot_ebr)
+print(baseline_results[["AUT_Originality"]]$plot_wmc)
+p3 <- print(baseline_results[["AUT_Fluency"]]$plot_wmc)
+```
+```{r}
+baseline_results[["RAT_Accuracy"]]$summary
+print(baseline_results[["RAT_Accuracy"]]$plot_ebr)
+p4 <- print(baseline_results[["RAT_Accuracy"]]$plot_wmc)
+```
+```{r}
+# Subset to baseline only
+dat <- df %>%
+  dplyr::filter(Dose == "Baseline") %>%
+  dplyr::select(Participant.ID, AUT_Originality, RAT_Accuracy) %>%
+  na.omit()
+
+# Linear model
+model <- lm(RAT_Accuracy ~ AUT_Originality, data = dat)
+summary(model)
+anova(model)
+
+# Scatter plot
+p5 <- ggplot(dat, aes(x = AUT_Originality, y = RAT_Accuracy)) +
+  geom_point(
+    aes(color = factor(Participant.ID)),
+    size = 2.5,
+    alpha = 0.8,
+    show.legend = FALSE
+  ) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  labs(
+    x = "AUT Originality",
+    y = "RAT Accuracy"
+  ) +
+  theme_classic(base_size = 30)
+```
+
+```{r}
+# Subset to baseline only
+dat <- df %>%
+  dplyr::filter(Dose == "Baseline") %>%
+  dplyr::select(Participant.ID, AUT_Flexibility, RAT_Accuracy) %>%
+  na.omit()
+
+# Linear model
+model <- lm(RAT_Accuracy ~ AUT_Flexibility, data = dat)
+summary(model)
+anova(model)
+
+# Scatter plot
+p6<- ggplot(dat, aes(x = AUT_Flexibility, y = RAT_Accuracy)) +
+  geom_point(
+    aes(color = factor(Participant.ID)),
+    size = 2.5,
+    alpha = 0.8,
+    show.legend = FALSE
+  ) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  labs(
+    x = "AUT Flexibility",
+    y = "RAT Accuracy"
+  ) +
+  theme_classic(base_size = 30)
+```
+
+```{r}
+# Subset to baseline only
+dat <- df %>%
+  dplyr::filter(Dose == "Baseline") %>%
+  dplyr::select(Participant.ID, AUT_Fluency, RAT_Accuracy) %>%
+  na.omit()
+
+# Linear model
+model <- lm(RAT_Accuracy ~ AUT_Fluency, data = dat)
+summary(model)
+anova(model)
+
+# Scatter plot
+p7 <- ggplot(dat, aes(x = AUT_Fluency, y = RAT_Accuracy)) +
+  geom_point(
+    aes(color = factor(Participant.ID)),
+    size = 2.5,
+    alpha = 0.8,
+    show.legend = FALSE
+  ) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  labs(
+    x = "AUT Fluency",
+    y = "RAT Accuracy"
+  ) +
+  theme_classic(base_size = 30)
+```
+```{r}
+# Subset to baseline only
+dat2 <- df %>%
+  dplyr::filter(Dose == "Baseline") %>%
+  dplyr::select(Participant.ID, AUT_Originality, AUT_Flexibility, AUT_Fluency, RAT_Accuracy, WMC, EBR) %>%
+  na.omit()
+
+model <- lm(RAT_Accuracy ~ WMC, data = dat2)
+summary(model)
+anova(model)
+
+model <- lm(AUT_Fluency ~ WMC, data = dat2)
+summary(model)
+anova(model)
+
+model <- lm(WMC ~ EBR, data = dat2)
+summary(model)
+anova(model)
+
+model <- lm(AUT_Originality ~ EBR, data = dat2)
+summary(model)
+anova(model)
+
+```
+
+
+```{r}
+# calculate difference scores (from baseline)
+library(dplyr)
+
+# 1) Recode missing values
+df[df == 999] <- NA
+
+# 2) Dose order
+df$Dose <- factor(df$Dose, levels = c("Baseline", "Placebo", "10mg/70kg"))
+
+# 3) Variable groups
+id_var     <- "Participant.ID"
+design_vars <- c("Dose", "Session")
+repeat_vars <- c("EBR", "WMC")   # repeat same value within participant
+diff_vars   <- setdiff(names(df), c(id_var, design_vars, repeat_vars))
+
+# 4) Baseline values for difference-score variables
+baseline_diff <- df %>%
+  filter(Dose == "Baseline") %>%
+  select(all_of(c(id_var, diff_vars))) %>%
+  rename_with(~ paste0(.x, "_BL"), all_of(diff_vars))
+
+# 5) Baseline values for repeated variables
+baseline_repeat <- df %>%
+  filter(Dose == "Baseline") %>%
+  select(all_of(c(id_var, repeat_vars))) %>%
+  rename_with(~ paste0(.x, "_REP"), all_of(repeat_vars))
+
+# 6) Keep only Placebo and 10mg/70kg rows
+target <- df %>%
+  filter(Dose %in% c("Placebo", "10mg/70kg")) %>%
+  select(all_of(c(id_var, "Dose", "Session", diff_vars)))
+
+# 7) Join baseline data
+df_diff <- target %>%
+  left_join(baseline_diff, by = id_var) %>%
+  left_join(baseline_repeat, by = id_var)
+
+# 8) Compute condition - baseline for every difference-score variable
+for (v in diff_vars) {
+  df_diff[[v]] <- df_diff[[v]] - df_diff[[paste0(v, "_BL")]]
+}
+
+# 9) Replace EBR and WMC with repeated baseline values
+for (v in repeat_vars) {
+  df_diff[[v]] <- df_diff[[paste0(v, "_REP")]]
+}
+
+# 10) Keep only final columns
+df_diff <- df_diff %>%
+  select(all_of(c(id_var, "Dose", "Session", repeat_vars, diff_vars)))
+
+# 11) Export
+write.csv(df_diff, "difference_scores_long_format.csv", row.names = FALSE)
+```
+
+
+```{r}
+library(lme4)
+library(lmerTest)
+library(ggplot2)
+library(dplyr)
+
+run_mixed_model <- function(data, outcome) {
+  dat <- data %>%
+    select(Participant.ID, Dose, Session, EBR, WMC, all_of(outcome)) %>%
+    na.omit()
+
+  colnames(dat)[colnames(dat) == outcome] <- "y"
+
+  model <- lmer(
+    y ~ Dose*EBR + Session + WMC + (1 | Participant.ID),
+    data = dat,
+    REML = FALSE
+  )
+
+  p <- ggplot(dat, aes(x = Dose, y = y, group = Participant.ID, color = Participant.ID)) +
+    geom_boxplot(
+      aes(group = Dose),
+      color = "black",
+      fill = NA,
+      outlier.shape = NA,
+      width = 0.5
+    ) +
+    geom_line(alpha = 0.5, linewidth = 0.6) +
+    geom_point(
+      size = 2.5,
+      alpha = 0.9,
+      position = position_jitter(width = 0.05, height = 0)
+    ) +
+    labs(
+      x = "Dose",
+      y = outcome
+    ) +
+    theme_classic(base_size = 30) +
+    theme(legend.position = "none")
+
+  list(
+    model = model,
+    summary = summary(model),
+    anova = anova(model),
+    plot = p
+  )
+}
+```
+
+```{r}
+res_rat <- run_mixed_model(df_diff, "RAT_Accuracy")
+res_rat$summary
+res_rat$anova
+p8 <- print(res_rat$plot)
+```
+```{r}
+res_ratinsight <- run_mixed_model(df_diff, "RAT_Accurate_Insight")
+res_ratinsight$summary
+res_ratinsight$anova
+print(res_ratinsight$plot)
+```
+```{r}
+res_ratininsight <- run_mixed_model(df_diff, "RAT_Inaccurate_Insight")
+res_ratininsight$summary
+res_ratininsight$anova
+print(res_ratininsight$plot)
+```
+```{r}
+res_orig <- run_mixed_model(df_diff, "AUT_Originality")
+res_orig$summary
+res_orig$anova
+p9 <- print(res_orig$plot)
+```
+```{r}
+res_fluency <- run_mixed_model(df_diff, "AUT_Fluency")
+res_fluency$summary
+res_fluency$anova
+p10 <- print(res_fluency$plot)
+```
+```{r}
+res_flex <- run_mixed_model(df_diff, "AUT_Flexibility")
+res_flex$summary
+res_flex$anova
+p11 <- print(res_flex$plot)
+```
+```{r}
+library(dplyr)
+library(ggplot2)
+library(broom.mixed)
+library(purrr)
+
+# Put models/results into one named list
+all_results <- list(
+  RAT_Accuracy     = res_rat,
+  AUT_Originality  = res_orig,
+  AUT_Fluency      = res_fluency,
+  AUT_Flexibility  = res_flex
+)
+
+# Extract fixed-effect coefficients
+coef_df <- imap_dfr(all_results, function(res, outcome_name) {
+  broom.mixed::tidy(
+    res$model,
+    effects = "fixed",
+    conf.int = TRUE
+  ) %>%
+    mutate(outcome = outcome_name)
+})
+
+# Optional: remove intercept
+coef_df_plot <- coef_df %>%
+  filter(term != "(Intercept)")
+
+# Plot all coefficients together
+modelplot <- ggplot(coef_df_plot, aes(x = estimate, y = term, color = outcome)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray40") +
+  geom_point(position = position_dodge(width = 0.6), size = 3) +
+  geom_errorbarh(
+    aes(xmin = conf.low, xmax = conf.high),
+    position = position_dodge(width = 0.6),
+    height = 0.2
+  ) +
+  labs(
+    title = "Fixed-Effect Coefficients Across Models",
+    x = "Coefficient Estimate",
+    y = "Model Term",
+    color = "Outcome"
+  ) +
+  theme_classic(base_size = 30)
+```
+
+
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+plot_dose_ebr_interaction <- function(data, outcome, ebr_var = "EBR", id_var = "Participant.ID") {
+  
+  # Keep only needed columns
+  dat <- data %>%
+    select(all_of(c(id_var, "Dose", "Session", ebr_var, outcome))) %>%
+    na.omit()
+  
+  # Create participant-level EBR group (Low / High)
+  ebr_groups <- dat %>%
+    group_by(.data[[id_var]]) %>%
+    summarise(EBR_value = first(.data[[ebr_var]]), .groups = "drop") %>%
+    mutate(
+      EBR_group = ifelse(
+        EBR_value <= median(EBR_value, na.rm = TRUE),
+        "Low EBR",
+        "High EBR"
+      )
+    )
+  
+  # Join group back to row-level data
+  dat <- dat %>%
+    left_join(ebr_groups, by = setNames(id_var, id_var))
+  
+  # Plot
+  p <- ggplot(
+    dat,
+    aes(
+      x = Dose,
+      y = .data[[outcome]],
+      group = .data[[id_var]],
+      color = .data[[id_var]]
+    )
+  ) +
+    geom_boxplot(
+      aes(group = Dose),
+      color = "black",
+      fill = NA,
+      outlier.shape = NA,
+      width = 0.5
+    ) +
+    geom_line(alpha = 0.45, linewidth = 0.5) +
+    geom_point(
+      size = 2.2,
+      alpha = 0.9,
+      position = position_jitter(width = 0.05, height = 0)
+    ) +
+    facet_wrap(~ EBR_group) +
+    labs(
+      title = paste(outcome, "by Dose, grouped by Low vs High EBR"),
+      x = "Dose",
+      y = outcome
+    ) +
+    theme_classic(base_size = 30) +
+    theme(legend.position = "none")
+  
+  return(p)
+}
+```
+
+
+```{r}
+p_aut_flex <- plot_dose_ebr_interaction(df_diff, "AUT_Originality")
+print(p_aut_flex)
+```
+```{r}
+p_rat_acc <- plot_dose_ebr_interaction(df_diff, "RAT_Accuracy")
+print(p_rat_acc)
+```
+```{r}
+
+model_dat <- df_diff %>%
+  select(Participant.ID, Dose, Session, EBR, WMC, AUT_Originality) %>%
+  na.omit()
+
+m_diff <- lm(AUT_Originality ~ Dose * EBR + Session + WMC, data = model_dat)
+
+model_dat$cooks_d <- cooks.distance(m_diff)
+model_dat$hat <- hatvalues(m_diff)
+model_dat$std_resid <- rstandard(m_diff)
+
+cutoff <- 4 / nrow(model_dat)
+
+model_dat %>%
+  mutate(influential = cooks_d > cutoff) %>%
+  arrange(desc(cooks_d)) %>%
+  select(Participant.ID, Dose, AUT_Originality, cooks_d, hat, std_resid, influential)
+
+infl_ids <- model_dat %>%
+  mutate(influential = cooks_d > cutoff) %>%
+  filter(influential) %>%
+  pull(Participant.ID) %>%
+  unique()
+
+infl_ids
+
+model_dat_no <- model_dat %>%
+  filter(!Participant.ID %in% infl_ids)
+
+m_diff_full <- lm(AUT_Originality ~ Dose * EBR + Session + WMC, data = model_dat)
+m_diff_no   <- lm(AUT_Originality ~ Dose * EBR + Session + WMC, data = model_dat_no)
+
+summary(m_diff_full)
+summary(m_diff_no)
+```
+```{r}
+library(dplyr)
+
+check_diff_influence <- function(data, outcome) {
+  dat <- data %>%
+    select(Participant.ID, Dose, Session, EBR, WMC, all_of(outcome)) %>%
+    na.omit()
+
+  colnames(dat)[colnames(dat) == outcome] <- "y"
+
+  mod <- lm(y ~ Dose * EBR + Session + WMC, data = dat)
+
+  dat$cooks_d <- cooks.distance(mod)
+  dat$hat <- hatvalues(mod)
+  dat$std_resid <- rstandard(mod)
+
+  cutoff <- 4 / nrow(dat)
+
+  infl_ids <- dat %>%
+    filter(cooks_d > cutoff) %>%
+    pull(Participant.ID) %>%
+    unique()
+
+  dat_no <- dat %>%
+    filter(!Participant.ID %in% infl_ids)
+
+  mod_no <- lm(y ~ Dose * EBR + Session + WMC, data = dat_no)
+
+  list(
+    full_model = summary(mod),
+    diagnostics = dat %>% arrange(desc(cooks_d)),
+    influential_ids = infl_ids,
+    no_influential_model = summary(mod_no)
+  )
+}
+```
+
+```{r}
+res_infl <- check_diff_influence(df_diff, "AUT_Originality")
+res_infl$influential_ids
+res_infl$diagnostics
+res_infl$full_model
+res_infl$no_influential_model
+```
+```{r}
+df_diff_no <- df_diff %>%
+  filter(!Participant.ID %in% infl_ids)
+
+library(dplyr)
+library(ggplot2)
+
+plot_dose_by_ebr_group_clean <- function(data, outcome, id_var = "Participant.ID", ebr_var = "EBR") {
+  
+  dat <- data %>%
+    select(all_of(c(id_var, "Dose", "Session", ebr_var, "WMC", outcome))) %>%
+    na.omit()
+  
+  # Median split on EBR (participant-level)
+  ebr_groups <- dat %>%
+    group_by(.data[[id_var]]) %>%
+    summarise(EBR_value = first(.data[[ebr_var]]), .groups = "drop") %>%
+    mutate(
+      EBR_group = ifelse(
+        EBR_value <= median(EBR_value, na.rm = TRUE),
+        "Low EBR",
+        "High EBR"
+      )
+    )
+  
+  dat <- dat %>%
+    left_join(ebr_groups, by = setNames(id_var, id_var))
+  
+  ggplot(
+    dat,
+    aes(
+      x = Dose,
+      y = .data[[outcome]],
+      group = .data[[id_var]],
+      color = .data[[id_var]]
+    )
+  ) +
+    geom_boxplot(
+      aes(group = Dose),
+      color = "black",
+      fill = NA,
+      outlier.shape = NA,
+      width = 0.5
+    ) +
+    geom_line(alpha = 0.5, linewidth = 0.7) +
+    geom_point(
+      size = 2.5,
+      alpha = 0.9,
+      position = position_jitter(width = 0.04, height = 0)
+    ) +
+    facet_wrap(~ EBR_group) +
+    labs(
+      title = paste(outcome, "by Dose (outliers removed)"),
+      subtitle = "Grouped by Low vs High EBR",
+      x = "Dose",
+      y = outcome
+    ) +
+    theme_classic(base_size=30) +
+    theme(legend.position = "none")
+}
+
+p_full  <- plot_dose_by_ebr_group(df_diff, "AUT_Originality")
+p_clean <- plot_dose_by_ebr_group_clean(df_diff_no, "AUT_Originality")
+
+library(patchwork)
+p_full + p_clean
+```
+```{r}
+
+# Ensure Dose is correctly set
+df_diff_no$Dose <- factor(df_diff_no$Dose, levels = c("Placebo", "10mg/70kg"))
+
+# Create EBR group (same logic as your plot)
+df_diff_no$EBR_group <- ifelse(
+  df_diff_no$EBR <= median(df_diff_no$EBR, na.rm = TRUE),
+  "Low EBR",
+  "High EBR"
+)
+df_diff_no$EBR_group <- factor(df_diff_no$EBR_group)
+
+# Mixed model on change scores
+model_clean <- lmer(AUT_Originality ~ Dose * EBR_group + (1 | Participant.ID), data = df_diff_no)
+
+# ANOVA (tests crossover)
+anova(model_clean)
+
+# Post-hoc comparisons
+emmeans(model_clean, pairwise ~ Dose | EBR_group)
+```
+
+```{r}
+# Ensure factors are set correctly
+df_diff$Dose <- factor(df_diff$Dose, levels = c("Placebo", "10mg/70kg"))
+
+# Optional: create EBR group (to match your plots)
+df_diff$EBR_group <- ifelse(df_diff$EBR > median(df_diff$EBR, na.rm = TRUE), "High", "Low")
+df_diff$EBR_group <- factor(df_diff$EBR_group)
+
+# Mixed model on change scores
+model_diff <- lmer(RAT_Accuracy ~ Dose * EBR_group + (1 | Participant.ID), data = df_diff)
+
+# ANOVA table (interaction test = crossover)
+anova(model_diff)
+
+# Post-hoc: compare Placebo vs 10mg within each EBR group
+emmeans(model_diff, pairwise ~ Dose | EBR_group)
+```
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+
